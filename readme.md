@@ -5,8 +5,6 @@
 
 Author: ab212ab
 
-================================================================================
-
 References: mainly BO2's unpacked/decompiled sources and decompiled Lua files,
 plus some borrowings from BO3's Lua. This was built quickly via "vibe coding"
 (this document is largely AI-written too). If there's a better way to do any of
@@ -65,4 +63,3 @@ it, improvements are welcome.
 
   Method 2: install directly under
     %localappdata%\Plutonium\storage\t6
-================================================================================
