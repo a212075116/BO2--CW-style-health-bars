@@ -8,6 +8,7 @@ health bar** above its head, plus **floating damage numbers** on hit.
 ---
 
 ## Overview
+- This is a mod that is severely lacking in testing. I have only tested it in solo mode, and have not conducted any proper multiplayer testing, nor have I tested it to the extent of playing through to the later stages. In other words, this mod is likely quite unstable.
 
 - Near-range only by default — the bar fades in as a zombie gets close, and fades out
   past a threshold (it stays hidden but "in place" so it doesn't flicker).
