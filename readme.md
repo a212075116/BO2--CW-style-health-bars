@@ -5,8 +5,6 @@
 A small zombies mod that gives every zombie a **COD17 / Black Ops Cold War-style floating
 health bar** above its head, plus **floating damage numbers** on hit.
 
-**Author:** ab212ab
-
 ---
 
 ## Overview
@@ -164,6 +162,7 @@ Special thanks to the following projects and people — this work builds heavily
 - **plutoniummod** — [t6-scripts](https://github.com/plutoniummod/t6-scripts)
 - **Treyarch / Activision** — `bo3_scriptapifunctions`
 - **KingslayerKyle** — [T7LuaRepo](https://github.com/KingslayerKyle/T7LuaRepo)
+- **Laupetin** - [OpenAssetTools](https://github.com/Laupetin/OpenAssetTools)
 
 ---
 
