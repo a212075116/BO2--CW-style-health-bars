@@ -2,10 +2,9 @@
 
 > **《使命召唤：黑色行动 2》（Plutonium T6）— 丧尸模式**
 
-一个丧尸 mod：给每只丧尸头顶加一个 **COD17 / 黑色行动冷战风格的悬浮血条**，命中时还有
+一个丧尸 mod：给每只僵尸加一个 **COD17 / 黑色行动冷战风格的悬浮血条**，命中时还有
 **漂浮伤害数字**。
 
-**作者：** ab212ab
 
 ---
 
@@ -146,13 +145,11 @@ LUI 读取后，每个命中占用数字池一个槽位，锚定到 GSC 在命�
 ---
 
 ## 致谢 / 参考资料
-
-特别感谢以下项目与个人——本作很大程度上建立在这些成果之上：
-
 - **JariKCoding** — [CoDLUIDecompiler](https://github.com/JariKCoding/CoDLUIDecompiler) 与 [CoDLuaDecompiler](https://github.com/JariKCoding/CoDLuaDecompiler)
 - **plutoniummod** — [t6-scripts](https://github.com/plutoniummod/t6-scripts)
 - **Treyarch / Activision** — `bo3_scriptapifunctions`
 - **KingslayerKyle** — [T7LuaRepo](https://github.com/KingslayerKyle/T7LuaRepo)
+- **Laupetin** - [OpenAssetTools](https://github.com/Laupetin/OpenAssetTools)
 
 ---
 
