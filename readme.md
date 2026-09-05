@@ -155,9 +155,6 @@ Two ways to install:
 ---
 
 ## Credits / References
-
-Special thanks to the following projects and people — this work builds heavily on them:
-
 - **JariKCoding** — [CoDLUIDecompiler](https://github.com/JariKCoding/CoDLUIDecompiler) & [CoDLuaDecompiler](https://github.com/JariKCoding/CoDLuaDecompiler)
 - **plutoniummod** — [t6-scripts](https://github.com/plutoniummod/t6-scripts)
 - **Treyarch / Activision** — `bo3_scriptapifunctions`
