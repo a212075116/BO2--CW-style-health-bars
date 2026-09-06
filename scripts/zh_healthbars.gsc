@@ -235,6 +235,11 @@ zh_killed_hook( einflictor, attacker, idamage, smeansofdeath, sweapon, vdir, shi
 		anchor = self.origin + ( 0, 0, 45 );
 
 	self zh_fire_number( attacker, idamage, anchor );
+
+	// BOCW-style kill notice, sent to whoever landed the killing blow. shitloc is the
+	// killing hit's LOCATION NAME ("head"/"helmet"/"torso_upper"/...), which is exactly
+	// what decides whether this reads as a "critical" kill.
+	attacker zh_push_kill_notice( smeansofdeath, shitloc );
 }
 
 onPlayerConnect()
@@ -345,6 +350,73 @@ zh_delete_anchor()
 	wait 2.5;
 	if( isDefined( self ) )
 		self delete();
+}
+
+// ---------------------------------------------------------------------------
+// BOCW-style kill notices ("+N Zombie Elimination" / "+N Zombie Critical Kill")
+//
+// The score is NOT guessed: it replays the stock "death" branch of
+// _zm_score::player_add_points(), which is
+//     get_zombie_death_player_points() + kill_bonus   ->   round_up_score(_, 5)
+// then multiplied by get_points_multiplier(player). Those are all stock global
+// functions / level.zombie_vars entries, so a mod that rebalances kill scores or
+// the point scalar is reflected automatically, with nothing to keep in sync here.
+// ---------------------------------------------------------------------------
+zh_kill_is_crit( means, hitloc )
+{
+	// Stock kill_bonus() checks MOD_MELEE / MOD_BURNED BEFORE hit_location, so a
+	// melee kill that happens to register on the head is not "critical" either.
+	if( means == "MOD_MELEE" || means == "MOD_BURNED" )
+		return false;
+	if( !isDefined( hitloc ) )
+		return false;
+	return ( hitloc == "head" || hitloc == "helmet" );
+}
+
+zh_kill_bonus( means, hitloc )
+{
+	// mirrors _zm_score::player_add_points_kill_bonus() (_zm_score.gsc:232-272)
+	if( means == "MOD_MELEE" )
+		return level.zombie_vars["zombie_score_bonus_melee"];
+	if( means == "MOD_BURNED" )
+		return level.zombie_vars["zombie_score_bonus_burn"];
+	if( !isDefined( hitloc ) )
+		return 0;
+	if( hitloc == "head" || hitloc == "helmet" )
+		return level.zombie_vars["zombie_score_bonus_head"];
+	if( hitloc == "neck" )
+		return level.zombie_vars["zombie_score_bonus_neck"];
+	if( hitloc == "torso_lower" || hitloc == "torso_upper" )
+		return level.zombie_vars["zombie_score_bonus_torso"];
+	return 0;
+}
+
+// self = the killer. Same arithmetic as the engine's own kill payout.
+zh_kill_score( means, hitloc )
+{
+	total = get_zombie_death_player_points() + zh_kill_bonus( means, hitloc );
+	return int( get_points_multiplier( self ) * round_up_score( total, 5 ) );
+}
+
+// Queue one notice on the killer; zh_damage_hud() flushes the queue to `zh_kill`.
+zh_push_kill_notice( means, hitloc )
+{
+	if( !isDefined( self.zh_killSeq ) )
+	{
+		self.zh_killSeq = 0;
+		self.zh_killList = [];
+		self.zh_killTimes = [];
+	}
+	self.zh_killSeq = self.zh_killSeq + 1;
+
+	crit = 0;
+	if( zh_kill_is_crit( means, hitloc ) )
+		crit = 1;
+
+	score = self zh_kill_score( means, hitloc );
+
+	self.zh_killList[ self.zh_killList.size ] = self.zh_killSeq + ":" + score + ":" + crit;
+	self.zh_killTimes[ self.zh_killTimes.size ] = gettime();
 }
 
 // Push ONE floating damage number through the shared channel: an entry in
@@ -681,6 +753,36 @@ zh_damage_hud()
 		self.zh_dmgList = newList;
 		self.zh_dmgTimes = newTimes;
 		self setclientdvar( "zh_dmg", dmgStr );
+
+		// ---- kill notices ----
+		// Same shape as the damage queue but events live longer: the LUI keeps a
+		// notice up for ~1s, so the queue has to survive long enough for the 0.1s
+		// poller to catch it, even during a fast double kill. Format: "seq:score:crit".
+		if( !isDefined( self.zh_killList ) )
+		{
+			self.zh_killList = [];
+			self.zh_killTimes = [];
+		}
+		newKill = [];
+		newKillTimes = [];
+		killStr = "";
+		kf = 1;
+		for( i = 0; i < self.zh_killList.size; i++ )
+		{
+			if( now - self.zh_killTimes[i] <= 1200 )
+			{
+				if( kf )
+					kf = 0;
+				else
+					killStr = killStr + ";";
+				killStr = killStr + self.zh_killList[i];
+				newKill[ newKill.size ] = self.zh_killList[i];
+				newKillTimes[ newKillTimes.size ] = self.zh_killTimes[i];
+			}
+		}
+		self.zh_killList = newKill;
+		self.zh_killTimes = newKillTimes;
+		self setclientdvar( "zh_kill", killStr );
 		wait 0.05;
 	}
 }

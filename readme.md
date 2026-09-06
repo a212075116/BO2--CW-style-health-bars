@@ -80,6 +80,26 @@ health bar** above its head, plus **floating damage numbers** on hit.
     matches the health actually lost.
   - The killing number reuses the **last non-lethal hit position** when one exists, so it
     appears where you hit rather than at the corpse.
+- **Kill notices** — `+100 Zombie Elimination`, or `+100 Zombie Critical Kill` in amber
+  - Printed to the **right of the crosshair**, the way the source game does it.
+  - `critical` fires when the **killing blow** landed on `head` / `helmet` — the same locations
+    the stock scoring code counts as a headshot, so the label and the bonus points always agree.
+    Melee and burn kills follow the stock precedence too (they are never "critical").
+  - The score is **not** a hardcoded number: it replays the stock death branch of
+    `_zm_score::player_add_points()` — `get_zombie_death_player_points()` + per-location bonus,
+    then `round_up_score(…, 5)`, then `× get_points_multiplier()`. So player-count kill
+    scores, point scalars and score rebalances are picked up with nothing to maintain here.
+  - Sits **perfectly still for 3 s**, then fades out while sliding ~14 px to the right. It
+    never drifts vertically on its own: a new notice takes the TOP row and pushes every older
+    one down a lane — gliding rather than teleporting — so a burst reads as a column being fed
+    from the top, and a notice that dies mid-list lets the ones below it glide back up. The one
+    shoved past the last visible row fades out on its way down to a 6th row instead of ever
+    appearing as a 6th still line, which is also why the element pool is `MaxKill + 1`.
+  - Score and words are **separate elements**, because they enter differently (read off a
+    slow-motion capture): the `+100` pops in at ~1.9× and eases down to 1.0× over ~0.26 s,
+    while the words simply appear. The shrink re-positions the score's box every frame so that
+    its **right edge stays pinned** to the words' left edge — scaling about an element's centre
+    would otherwise make the gap between the two breathe in and out.
 
 ---
 
@@ -203,6 +223,17 @@ LUI reads it; each hit takes a slot from the damage-number pool, anchors to a st
 GSC spawns at the hit point, and floats up. `seq` is a per-player counter used to dedupe,
 so the same hit is never drawn twice across polls.
 
+Kill notices travel on a third channel, same shape and same `seq` dedupe:
+
+```text
+zh_kill   "seq:score:isCritical;..."
+```
+
+Their queue retention is **1.2 s instead of 0.3 s**: a notice is on screen for seconds, so
+the event must survive long enough for the 0.1 s poller to catch it even during a fast
+double kill. Each entry carries the killer's own counter, and only the killing player's
+client dvar is written — in co-op nobody sees anybody else's notices.
+
 **Why not `luinotifyevent` / client field / server dvar?** Those channels are either
 unavailable or their budgets are exhausted in this title. The **client dvar +
 `UIExpression.DvarString`** channel is the only one actually proven to reach the LUI.
@@ -235,9 +266,30 @@ and the numbers reflect the damage those mods actually dealt.
 | `DMGSLOW` | Extra linger frames at close range (slower when close) | `18` |
 | `DMGDISTREF` | Distance reference used for the *rise-speed* adaptation | `200` |
 | `NUMDVARS` | Number of batched dvars | `8` |
+| `MaxKill` | **Visible rows.** The element pool is `MaxKill + 1`, so the one that got pushed out still has an element to fade with | `5` |
+| `KillMoveMs` | ms to travel one lane — how fast the group glides down when a new kill is inserted | `200` |
+| `KillEjectMs` | ms the notice pushed past the last visible row takes to fade while descending | `300` |
+| `KillHold` / `KillFade` | Still-display frames, then fade frames (50 ms each) | `60` (3.0 s) / `16` (0.8 s) |
+| `KillX` / `KillY` | Notice origin in **LUI units**, right of / above the screen centre | `137` / `-18` |
+| `KillSlide` | Units it drifts right — during the fade phase only | `10` |
+| `KillStack` / `KillH` | Lane gap / text box height | `18` / `20` |
+| `KillNumW` | Width reserved for the score part; its right edge *is* the words' left edge | `64` |
+| `KillPop` / `KillPopMs` | Score pop-in: starting scale / how long the shrink lasts | `1.9` / `260` ms |
+| `KillTick` | Fast-clock interval driving the pop. It exists only while a notice is on screen, so it costs nothing between kills | `25` ms |
 
 > `DMGTOP` and `DMGBODY` are still declared but **no longer used** — the old distance-based
 > *start-height* interpolation was replaced by spawning the number directly at the hit point.
+
+> **LUI units are not pixels.** At 16:9 the logical space is **1280×720** (`spectate.lua:16`
+> sets `CoD.SpectateHUD.ScreenWidth = 1280`), so `1 unit = display width / 1280`
+> (≈ 1.387 px on a 1775-px-wide capture). Measuring an offset from a screenshot therefore
+> needs dividing: `190 px → 137 units`, `25 px → 18 units`. The `*px*` wording in some
+> comments really means these logical units.
+
+> **Available font sizes** (`codbase.lua:112-118`): `ExtraSmall` < `Default`(smallFont)
+> < `Condensed`(normalFont) < `Big`(bigFont) < `Morris`(extraBigFont). There is **no**
+> `CoD.fonts.Bold`, and no `setFontSize` either — asking for an unregistered name silently
+> falls back to the default font instead of erroring.
 
 ### GSC — `scripts\zh_healthbars.gsc`
 
