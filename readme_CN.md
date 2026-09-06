@@ -1,6 +1,9 @@
 # BOCW 风格僵尸血条 — 黑色行动 2（Alpha）
 
+**[English](readme.md) | 简体中文**
+
 > **《使命召唤：黑色行动 2》（Plutonium T6）— 僵尸模式**
+> 仓库：<https://github.com/a212075116/BO2--CW-style-health-bars>
 
 mod：给每只僵尸加一个 **COD17 / 黑色行动冷战风格的悬浮血条**，命中时还有
 **漂浮伤害数字**。

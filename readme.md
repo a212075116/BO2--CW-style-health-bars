@@ -1,6 +1,9 @@
 # BOCW Style Zombie Health Bars — Black Ops 2 (Alpha)
 
+**English | [简体中文](readme_CN.md)**
+
 > **Call of Duty: Black Ops 2 (Plutonium T6) — Zombies**
+> Repo: <https://github.com/a212075116/BO2--CW-style-health-bars>
 
 A small zombies mod that gives every zombie a **COD17 / Black Ops Cold War-style floating
 health bar** above its head, plus **floating damage numbers** on hit.
