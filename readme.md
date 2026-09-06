@@ -10,38 +10,82 @@ health bar** above its head, plus **floating damage numbers** on hit.
 ## Overview
 - This is a mod that is severely lacking in testing. I have only tested it in solo mode, and have not conducted any proper multiplayer testing, nor have I tested it to the extent of playing through to the later stages. In other words, this mod is likely quite unstable.
 
-- Near-range only by default — the bar fades in as a zombie gets close, and fades out
-  past a threshold (it stays hidden but "in place" so it doesn't flicker).
-- Sneak a peek at a specific zombie by **aiming at it** — landing the crosshair on a
-  zombie reveals its bar even at long range (but only with clear line of sight).
-- **Hellhounds are supported too** — they get their own bar, an orange icon, and the
-  name `HELLHOUND`.
+- **The bar rides the head bone.** Each zombie gets an invisible anchor entity `linkto()`-ed
+  to its eye/head bone, so the bar tracks the actual head — including when the zombie leans,
+  lunges or crouches — instead of "feet origin plus a guessed height".
+- **Perspective-correct at any range.** Both the bar's *size* and its *clearance above the
+  head* scale with player→zombie distance, so a far-away zombie gets a proportionally smaller
+  bar instead of one that dwarfs and covers it.
+- **Clearance is screen-space on purpose.** Lifting the bar along the *world* vertical axis
+  collapses onto the zombie when you look DOWN at it from high ground (the lift projects to
+  `cos(pitch)`); a screen-space lift is immune to camera pitch.
+- **Near-range by default** — the bar fades in as a zombie gets close and fades out past a
+  threshold (it stays hidden but "in place" so it doesn't flicker).
+- **Sneak a peek at a specific zombie by aiming at it** — landing the crosshair on a zombie
+  reveals its bar at *any* range (still requires clear line of sight).
+- **Special zombie kinds get their own name and icon colour** — hellhounds, the theater
+  crawlers, the Origins mech zombie, the prison warden, the temple fire zombie, and more
+  (full table below).
 
 ---
 
 ## Features
 
 - **Health bar**
-  - Red fill with a black frame, floating above/behind the head.
+  - Red fill with a black frame, anchored to the zombie's head bone.
   - White **"ghost"** after-image that lags behind the red on damage, giving a smooth
     drain transition.
   - On death the bar drains to zero over ~0.6 s, then disappears.
 - **Show rules**
-  - Proximity fade: closer = brighter (full-bright ≤ 100, gone past ~260).
-  - **Crosshair reveal**: `dot > 0.99` against the zombie's chest (very strict).
+  - Proximity fade: full-bright at `d <= 150`, linear fade to nothing at `d > 300`
+    (units are inches — 150 ≈ 3.8 m, 300 ≈ 7.6 m).
+  - **Crosshair reveal**: `dot > 0.99` against the zombie's chest (very strict),
+    with **no distance limit**.
   - **Line-of-sight check**: cover / walls block the reveal (`bullettracepassed`).
-- **Icon + name**
-  - A square icon left of the bar: **red** for zombies, **orange** for hellhounds.
-  - A name under the bar (`ZOMBIE` / `HELLHOUND`) in white with a black shadow.
+- **Icon + name**, keyed off the entity's `animname` (the field BO2 itself uses to tell
+  zombie kinds apart):
+
+  | Zombie | Label | Icon colour |
+  |--------|-------|-------------|
+  | Plain zombie | `ZOMBIE` | red |
+  | Hellhound | `HELLHOUND` | orange |
+  | Theater crawler ("quad") | `CRAWLER` | violet |
+  | Origins mech zombie | `MECH` | cyan |
+  | Prison warden (Brutus) | `WARDEN` | salmon |
+  | Temple fire zombie | `FLAME` | hot orange |
+  | Shrieker | `SHRIEKER` | green |
+  | Leaper | `LEAPER` | yellow |
+  | Ghost | `GHOST` | pale white-blue |
+  | Astro zombie | `ASTRO` | blue |
+  | Monkey bomb | `MONKEY` | brown |
+  | Giant robot walker | `ROBOT` | steel |
+
+  A name appears under the bar in white with a black shadow. Unmapped kinds keep `ZOMBIE`.
 - **Damage numbers**
-  - Pop from the hit point, float **straight up**, and fade out.
+  - Pop from the **hit point**, float **straight up**, and fade out.
   - Colour fades **red → white** over the pop.
-  - Start height and rise speed adapt to player→zombie **distance**: point-blank hits
-    start low and rise slowly (so melee is readable), long-range hits start higher and
-    rise at normal speed.
+  - Rise speed adapts to distance: point-blank hits linger longer (so melee stays readable),
+  long-range hits float at normal speed.
   - A pool of 16 lets several numbers stack during fast fire.
-  - The killing blow works too (each number is pinned to a **static anchor** GSC spawns
-    at the hit point, so it doesn't ride the zombie or fall back to the map origin).
+  - **The killing blow works too.** Vanilla `_zm_spawner::enemy_death_detection()` bails out
+    with `if ( !isalive(self) ) return;` *before* the damage callbacks fire, so a one-shot
+    kill reaches no damage hook at all. This mod catches it on the engine's actor-KILLED
+    path instead, where the damage value is already post-multiplier — i.e. the number shown
+    matches the health actually lost.
+  - The killing number reuses the **last non-lethal hit position** when one exists, so it
+    appears where you hit rather than at the corpse.
+
+---
+
+## Console variables
+
+| Command | Effect |
+|---------|--------|
+| `setdvar zh_animname 1` | **Label probe (diagnostic).** Any zombie whose kind is *not* in the table above prints its raw `animname` as its label, so an unknown monster reveals its own real name on screen. Add a row in the GSC dispatcher and a colour row in `ICON_TINT`, then set it back to `0`. |
+| `setdvar zh_animname 0` | Off — the default. Already-labelled kinds are never affected, so the probe can stay on while you hunt for new ones. |
+
+The dvar is read per pass, not snapshotted at load: switching it takes effect immediately,
+without a restart. (Code changes *do* need one — GSC is not hot-reloaded.)
 
 ---
 
@@ -64,20 +108,27 @@ Drop each half into its injection folder:
 | `ui_mp\t6\hud.lua`, `ui_mp\t6\zombie\zombiehealthbars.lua` | `%localappdata%\Plutonium\storage\t6\ui_mp` |
 
 > The GSC and the LUI are two separate injectables; **both** must be in place to work.
+> A loose `.gsc` in a mod folder overrides the packed `mod.ff`, so you can edit and restart
+> without repacking.
 
 ---
 
 ## How it works (data flow)
 
-GSC walks every zombie / hellhound every ~0.1 s and packs the data into several
+GSC walks every zombie / hellhound / crawler every ~0.1 s and packs the data into several
 **client dvars** (batched so a single dvar doesn't grow too long and get truncated):
 
 ```text
-zh_data_0 .. zh_data_N    "entityNum:ratio100:alpha100:name;..."
+zh_data_0 .. zh_data_N    "entityNum:ratio100:alpha100:name:distance;..."
 ```
 
-LUI polls those dvars every ~0.1 s, keys each bar by entity number, and follows the
-entity via `setupEntityContainer`.
+- `entityNum` is the **head-anchor entity's** number when an anchor exists (the anchor is
+  `linkto()`-ed to the zombie's eye/head bone), otherwise the zombie itself.
+- `distance` is the server-computed player→zombie range, which is what lets the LUI scale the
+  bar's size and head clearance per zombie.
+
+LUI polls those dvars every ~0.1 s, keys each bar by entity number, and follows the entity
+via `setupEntityContainer`.
 
 Damage numbers travel on a separate event channel:
 
@@ -85,12 +136,20 @@ Damage numbers travel on a separate event channel:
 zh_dmg    "entityNum:amount:seq:distance;..."
 ```
 
-LUI reads it; each hit takes a slot from the damage-number pool, anchors to a static
-anchor GSC spawns at the hit point, and floats up.
+LUI reads it; each hit takes a slot from the damage-number pool, anchors to a static anchor
+GSC spawns at the hit point, and floats up. `seq` is a per-player counter used to dedupe,
+so the same hit is never drawn twice across polls.
 
 **Why not `luinotifyevent` / client field / server dvar?** Those channels are either
 unavailable or their budgets are exhausted in this title. The **client dvar +
 `UIExpression.DvarString`** channel is the only one actually proven to reach the LUI.
+
+**Why a per-entity kill hook instead of a global one?** The mod deliberately grabs **no**
+`level.*` callback singleton (`level.callbackActorDamage`, `level.callbackactorkilled`).
+It registers into the *array*-based damage callback list, where many registrants coexist, and
+assigns only its own per-entity `actor_killed_override` slot. That keeps it fully independent
+of any other mod's damage overrides — installing it on top of a weapon-damage mod is safe,
+and the numbers reflect the damage those mods actually dealt.
 
 ---
 
@@ -100,26 +159,33 @@ unavailable or their budgets are exhausted in this title. The **client dvar +
 
 | Constant | Meaning | Default |
 |----------|---------|---------|
-| `BARW` / `BARH` | Bar width / height | `60` / `6` |
-| `HEADZ` | Bar offset above the head | `70` |
+| `BARW` / `BARH` | Bar width / height at reference distance | `60` / `6` |
+| `HEADZ_TABLE` | Distance → clearance above the head, in px. Rows are `{ distance, pixels }`; values **between** rows are linearly interpolated, so the bar lifts smoothly with range. Edit freely, keep distances ascending. | `50→13, 100→16, 150→18, 250→21, 500→23` |
+| `HEADZSCALE` | Global multiplier on that curve (shift the whole thing up/down) | `1.0` |
+| `BARDISTREF` | Distance at which the bar equals its design size; scale is `k = BARDISTREF / dist` | `300` |
+| `BARSCALEMAX` | Ceiling on the **zoom-in** side only. Shrinking with distance is never capped, so far-away scaling stays perspective-true. At `1.2` the bar stops growing closer than `BARDISTREF / BARSCALEMAX` (= 250). | `1.2` |
 | `ICONW` / `ICONGAP` | Left icon size / gap to bar | `12` / `6` |
+| `ICON_TINT` | Label → icon RGB. New zombie kind = one row here (+ one `else if` in the GSC). Unknown labels fall back to `ZOMBIE`'s colour. | see table above |
 | `MaxDmg` | Damage-number pool size | `16` |
 | `DMGSTEPS` | Float-up frames (~0.85 s; bigger = slower) | `17` |
 | `DMGRISE` | Total rise in px | `30` |
-| `DMGTOP` | Long-range start offset above the bar | `6` |
-| `DMGBODY` | Point-blank start height (zombie body) | `30` |
-| `DMGDISTREF` | Distance at which it reaches the long-range start | `200` |
 | `DMGSLOW` | Extra linger frames at close range (slower when close) | `18` |
+| `DMGDISTREF` | Distance reference used for the *rise-speed* adaptation | `200` |
 | `NUMDVARS` | Number of batched dvars | `8` |
+
+> `DMGTOP` and `DMGBODY` are still declared but **no longer used** — the old distance-based
+> *start-height* interpolation was replaced by spawning the number directly at the hit point.
 
 ### GSC — `scripts\zh_healthbars.gsc`
 
 | Setting | Value |
 |---------|-------|
-| Show distance | near threshold `260`, full-bright `100`, aim-show cap `900` |
-| Aim check | `dot > 0.99` |
+| Show distance | full-bright `150`, gone past `300` |
+| Aim reveal | `dot > 0.99`, **no distance cap** |
 | Death drain window | `600` ms |
 | Batch size | `zh_batch = 10` (zombies/dvar), `zh_dvars = 8` (dvars) |
+| Head bone probe | `tag_eye`, `j_head`, `J_EyeBall_LE`, `tag_head` (first one that resolves) |
+| Watch poll | `0.05` s |
 
 ---
 
@@ -145,13 +211,24 @@ Two ways to install:
 
 ## Known limitations
 
-- The damage-number anchors are a **shared static-entity pool**: if more than `MaxDmg`
-  numbers are floating at once, the oldest may be "borrowed" by a newer hit and jump.
-  Barely noticeable solo / on LAN.
+- **Heavily under-tested**, solo only. See *Overview*.
+- The bar follows a **bone anchor**, which needs a head bone to resolve. A model with none of
+  the probed tags falls back to the zombie's own origin, so its bar sits lower — the fire
+  zombie and other custom models are the likeliest candidates.
+- Distance-driven sizing means **far-away bars are genuinely small**. That is the point
+  (they no longer cover the zombie), but it also makes them hard to read at extreme range.
+- Damage-number anchors are a **shared static-entity pool**: if more than `MaxDmg` numbers are
+  floating at once, the oldest may be "borrowed" by a newer hit and jump. Barely noticeable
+  solo / on LAN.
+- The **killing blow has no hit coordinate** in the engine's kill callback (`shitloc` there is a
+  hit-*location name* like `"helmet"`, not a position). The number therefore reuses the last
+  non-lethal hit's position when there was one; a pure one-shot kill from full health falls
+  back to the body hit position and then to the zombie's position, so it can be approximate.
 - In multiplayer each player's damage numbers go to their own client dvar, so they're
-  independent per player.
-- The bars are a **client injection (ui_mp)**; if `ui_mp` is cleared or fails to load,
-  the health bars are missing.
+  independent per player. Bar *visibility*, however, is still computed per player but shares
+  the same zombie set — not stress-tested with 4+ players.
+- The bars are a **client injection (ui_mp)**; if `ui_mp` is cleared or fails to load, the
+  health bars are missing.
 
 ---
 
