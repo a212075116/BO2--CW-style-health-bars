@@ -190,13 +190,6 @@ function HUD_SetupEventHandlers_Multiplayer(HUDWidget)
 	HUDWidget:registerEventHandler("hud_force_kill_killstreak_hud", HUD_ForceKillKillstreakHud)
 	HUDWidget:registerEventHandler("hud_update_vehicle", HUD_UpdateVehicleHud)
 	HUDWidget:registerEventHandler("faction_popup", HUD_FactionPopup)
-	-- Zombie health bars: receive the server push on the HUD root (luinotifyevent
-	-- only reaches handlers registered during HUD setup), then forward it.
-	HUDWidget:registerEventHandler("zombie_bars", function(hudWidget, event)
-		if CoD.ZombieHealthBars and CoD.ZombieHealthBars.current then
-			CoD.ZombieHealthBars.OnBars(CoD.ZombieHealthBars.current, event)
-		end
-	end)
 	HUDWidget:registerEventHandler("hud_update_team_change", HUD_UpdateRefresh)
 	HUDWidget:registerEventHandler("hud_update_bit_" .. CoD.BIT_SPECTATING_CLIENT, HUD_UpdateRefresh)
 	HUDWidget:registerEventHandler("hud_update_bit_" .. CoD.BIT_TEAM_SPECTATOR, HUD_UpdateRefresh)
@@ -458,10 +451,6 @@ function HUD_FirstSnapshot_Zombie(HUDWidget, ClientInstance)
 	if Engine.GameModeIsMode(CoD.GAMEMODE_LOCAL_SPLITSCREEN) == false then
 		CoD.DemoHUD.AddHUDWidgets(HUDWidget, ClientInstance)
 	end
-
-	-- Zombie health bars (COD17 style) - added by a2120
-	require("T6.Zombie.ZombieHealthBars")
-	Widget:addElement(LUI.createMenu.ZombieHealthBars(ClientInstance.controller))
 end
 
 function HUD_ToggleZombieHudContainer(HUDWidget, ClientInstance)
@@ -921,6 +910,15 @@ function HUD_Handle_ChooseClass_HotKey(HUDWidget, ClientInstance)
 		})
 	end
 end
+
+-- ===== CONFLICT-MOUNT TEST =====
+-- Everything above this line is the UNMODIFIED official hud.lua, standing in for
+-- "some other mod owns the LUI entry file". Our mod contributes exactly ONE line:
+-- the require below, which hands off to ui_mp/t6/zombie/zhbmount.lua (that shim
+-- WRAPS HUD_FirstSnapshot_Zombie rather than redefining it, so the host's own
+-- version keeps running). Placed BEFORE DisableGlobals() on purpose: mounting may
+-- still assign globals, and DisableGlobals() closes that door.
+require("T6.Zombie.ZHBMount")
 
 DisableGlobals()
 Engine.StopEditingPresetClass()
