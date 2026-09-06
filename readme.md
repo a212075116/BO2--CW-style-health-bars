@@ -26,6 +26,9 @@ health bar** above its head, plus **floating damage numbers** on hit.
 - **Special zombie kinds get their own name and icon colour** — hellhounds, the theater
   crawlers, the Origins mech zombie, the prison warden, the temple fire zombie, and more
   (full table below).
+- **Installs alongside other Lua mods** — `ui_mp/t6/hud.lua` ships as the *unmodified official
+  file plus a single `require` line*, so it can be replaced by another mod's entry without
+  losing anything (see *Coexistence*).
 
 ---
 
@@ -65,7 +68,7 @@ health bar** above its head, plus **floating damage numbers** on hit.
   - Pop from the **hit point**, float **straight up**, and fade out.
   - Colour fades **red → white** over the pop.
   - Rise speed adapts to distance: point-blank hits linger longer (so melee stays readable),
-  long-range hits float at normal speed.
+    long-range hits float at normal speed.
   - A pool of 16 lets several numbers stack during fast fire.
   - **The killing blow works too.** Vanilla `_zm_spawner::enemy_death_detection()` bails out
     with `if ( !isalive(self) ) return;` *before* the damage callbacks fire, so a one-shot
@@ -96,20 +99,77 @@ scripts/
   zh_healthbars.gsc                  # server-side GSC (own init() entry, self-contained)
 
 ui_mp/
-  t6/hud.lua                         # LUI override that mounts the widget
-  t6/zombie/zombiehealthbars.lua     # LUI widget (bars + damage numbers) itself
+  t6/hud.lua                         # the OFFICIAL hud.lua + ONE trailing require line
+  t6/zombie/zombiehealthbars.lua     # the LUI widget (bars + damage numbers)
+  t6/zombie/zhbmount.lua             # mount shim: wraps the host's HUD entry
 ```
 
-Drop each half into its injection folder:
+`hud.lua` is deliberately **not** a rewritten file any more — diff it against the stock game
+version and the only difference is the last few lines:
 
-| File | Goes to |
-|------|---------|
-| `scripts\zh_healthbars.gsc` | `%localappdata%\Plutonium\storage\t6\scripts` |
-| `ui_mp\t6\hud.lua`, `ui_mp\t6\zombie\zombiehealthbars.lua` | `%localappdata%\Plutonium\storage\t6\ui_mp` |
+```lua
+require("T6.Zombie.ZHBMount")     -- the only thing this mod puts in hud.lua
 
-> The GSC and the LUI are two separate injectables; **both** must be in place to work.
-> A loose `.gsc` in a mod folder overrides the packed `mod.ff`, so you can edit and restart
-> without repacking.
+DisableGlobals()
+Engine.StopEditingPresetClass()
+```
+
+That single line is the whole integration surface. It sits **before** `DisableGlobals()`
+on purpose, because mounting still needs to assign globals.
+
+---
+
+## Coexistence with another Lua mod
+
+LUI has exactly **one** entry file: `ui_mp/t6/hud.lua`. If two mods both ship it, Plutonium
+keeps only one (mod priority, whole-file overwrite, no warning) and the loser stops working
+entirely. Worse, stock `hud.lua` defines its helpers as **global functions**, so if both
+files somehow ran, whichever defined `HUD_FirstSnapshot_Zombie` last would silently
+overwrite the other's version.
+
+So the rule is: **one entry file, everything else via `require`.** This mod contributes a
+single `require` line and does the rest in its own files; `zhbmount.lua` **wraps** the host's
+function instead of redefining it:
+
+```lua
+local prev = HUD_FirstSnapshot_Zombie
+HUD_FirstSnapshot_Zombie = function(HUDWidget, ClientInstance)
+    prev(HUDWidget, ClientInstance)   -- the host mod runs first, untouched
+    zhBarsAttach(HUDWidget)           -- then our widget is mounted
+end
+```
+
+### Pick whichever applies
+
+**A — no other Lua mod touches `hud.lua`** (the common case): install all three files as
+listed above. Done.
+
+**B — another mod owns `hud.lua`:** do **not** install this mod's `hud.lua`. Instead add the
+same one line to the **very end** of *that* mod's `hud.lua`, just before `DisableGlobals()`:
+
+```lua
+require("T6.Zombie.ZHBMount")
+```
+
+Then install only the two `t6/zombie/*.lua` files. Both mods keep working, and updating
+the other mod never reverts our mount.
+
+### Where the two mods could still collide
+
+| Shared resource | What this mod uses | Risk |
+|---|---|---|
+| `ui_mp/t6/hud.lua` | official file + 1 line | the only hard conflict — avoided by path B above |
+| Global functions | wrapped, never redefined | low |
+| Global namespace | `CoD.ZombieHealthBars`, `CoD.ZombieHealthBarsMount` | own names, safe |
+| `LUI.createMenu` key | `ZombieHealthBars` | own name, safe |
+| Event names | `zombie_bars` | custom name, safe |
+| Client dvars | `zh_data_0..7`, `zh_dmg` | own prefix, safe |
+| GSC callbacks | never grabs a `level.*` singleton | verified against weapon-damage mods |
+
+The one thing left to check by eye is **HUD layering**: our widget is `addElement`-ed to the
+HUD root, and draw order follows insertion order. If the other mod also paints a large
+full-screen element, one may cover the other — swapping the `require` order fixes that and
+loses no functionality.
 
 ---
 
@@ -191,21 +251,27 @@ and the numbers reflect the damage those mods actually dealt.
 
 ## Installation
 
-Two ways to install:
-
-**Method 1 — install onto an existing mod**
+**Step 1 — pick a location.** Either way works:
 
 ```text
 %localappdata%\Plutonium\storage\t6\mods\<the mod folder you want>
 ```
-
-**Method 2 — install directly under the storage folder**
-
 ```text
 %localappdata%\Plutonium\storage\t6
 ```
 
-> Full per-file paths are listed in the *File structure* section above.
+**Step 2 — install the files** (full per-file paths in *File structure* above):
+
+| File | Goes to |
+|------|---------|
+| `scripts\zh_healthbars.gsc` | `<location>\scripts` |
+| `ui_mp\t6\zombie\zombiehealthbars.lua` | `<location>\ui_mp\t6\zombie` |
+| `ui_mp\t6\zombie\zhbmount.lua` | `<location>\ui_mp\t6\zombie` |
+| `ui_mp\t6\hud.lua` | `<location>\ui_mp\t6` — **only if no other mod owns that file**, see *Coexistence* |
+
+> The GSC and the LUI are two separate injectables; **both** must be in place to work.
+> A loose `.gsc` in a mod folder overrides the packed `mod.ff`, so you can edit and restart
+> without repacking.
 
 ---
 
@@ -224,6 +290,9 @@ Two ways to install:
   hit-*location name* like `"helmet"`, not a position). The number therefore reuses the last
   non-lethal hit's position when there was one; a pure one-shot kill from full health falls
   back to the body hit position and then to the zombie's position, so it can be approximate.
+- If a **third** mod also wraps `HUD_FirstSnapshot_Zombie`, wrapping order decides who runs
+  last. Ours only adds a widget, so it composes in either order, but keep it in mind when
+  stacking several HUD mods.
 - In multiplayer each player's damage numbers go to their own client dvar, so they're
   independent per player. Bar *visibility*, however, is still computed per player but shares
   the same zombie set — not stress-tested with 4+ players.

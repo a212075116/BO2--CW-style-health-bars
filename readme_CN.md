@@ -20,6 +20,8 @@ mod：给每只僵尸加一个 **COD17 / 黑色行动冷战风格的悬浮血条
 - **准星窥探**：把准星对准某只僵尸，**无论多远**都会显示它的血条（仍需有清晰视线）。
 - **特殊僵尸有独立名字与图标颜色**：地狱犬、剧院爬行者、起源机甲、监狱典狱长、圣殿火焰僵尸
   等等（完整见下方表格）。
+- **可与其它 Lua mod 共存**——`ui_mp/t6/hud.lua` 发布的是**未经修改的官方文件 + 末尾一行
+  `require`**，所以入口被别的 mod 占据时也不会丢功能（见"与其它 Lua mod 共存"）。
 
 ---
 
@@ -85,19 +87,22 @@ scripts/
   zh_healthbars.gsc                  # 服务端 GSC（自带 init() 入口，完全自包含）
 
 ui_mp/
-  t6/hud.lua                         # LUI 覆写：装载血条组件
+  t6/hud.lua                         # 官方 hud.lua + 末尾一行 require
   t6/zombie/zombiehealthbars.lua     # LUI 组件本体（血条 + 伤害数字）
+  t6/zombie/zhbmount.lua             # 挂载 shim：包住宿主的 HUD 入口函数
 ```
 
-各自放入对应注入目录：
+`hud.lua` 现在**已经不是一份被改写的文件**——拿它和游戏原版做 diff，唯一的区别就是末尾几行：
 
-| 文件 | 放入 |
-|------|------|
-| `scripts\zh_healthbars.gsc` | `%localappdata%\Plutonium\storage\t6\scripts` |
-| `ui_mp\t6\hud.lua`、`ui_mp\t6\zombie\zombiehealthbars.lua` | `%localappdata%\Plutonium\storage\t6\ui_mp` |
+```lua
+require("T6.Zombie.ZHBMount")     -- 本 mod 放进 hud.lua 的全部内容
 
-> GSC 与 LUI 是两套独立注入，**两个都必须放到位**才生效。
-> mod 目录里的散装 `.gsc` 会覆盖打包好的 `mod.ff`，所以改了重启即可，不用重新打包。
+DisableGlobals()
+Engine.StopEditingPresetClass()
+```
+
+这一行就是全部的接入面。它刻意放在 `DisableGlobals()` **之前**：挂载过程仍需要写全局，
+而 `DisableGlobals()` 会把这扇门关上。两种安装路线见下面"与其它 Lua mod 共存"一节。
 
 ---
 
@@ -188,7 +193,67 @@ LUI 读取后，每个命中占用数字池一个槽位，锚定到 GSC 在命�
 %localappdata%\Plutonium\storage\t6
 ```
 
-> 每个文件的完整路径见上方"文件构成"一节。
+> GSC 与 LUI 是两套独立注入，**两边都必须放到位**才生效。
+> mod 目录里的散装 `.gsc` 会覆盖打包好的 `mod.ff`，所以改了重启即可，不用重新打包。
+
+按文件对应放置（`<位置>` = 上面选定的那一个）：
+
+| 文件 | 放到 `<位置>\` 下 |
+|------|------|
+| `scripts\zh_healthbars.gsc` | `scripts\` |
+| `ui_mp\t6\zombie\zombiehealthbars.lua` | `ui_mp\t6\zombie\` |
+| `ui_mp\t6\zombie\zhbmount.lua` | `ui_mp\t6\zombie\` |
+| `ui_mp\t6\hud.lua` | `ui_mp\t6\` —— **仅当没有其它 mod 占用该文件时装**，见下一节 |
+
+---
+
+## 与其它 Lua mod 共存
+
+LUI 只有**一个**入口文件：`ui_mp/t6/hud.lua`。两个 mod 都带它时，Plutonium 按 mod 优先级
+**整文件覆盖**（不报错、不提示），输的那份**完全不执行**。更糟的是官方 `hud.lua` 里的辅助函数
+都是**全局函数**，即使两份都执行了，最后定义 `HUD_FirstSnapshot_Zombie` 的那个会把对方的实现
+**静默吃掉**。
+
+所以规则是：**入口唯一，其余全部走 `require`**。本 mod 只贡献一行 `require`，剩下的都在自己的
+文件里完成；`zhbmount.lua` 是**包住（wrap）**宿主的函数，而不是重定义它：
+
+```lua
+local prev = HUD_FirstSnapshot_Zombie
+HUD_FirstSnapshot_Zombie = function(HUDWidget, ClientInstance)
+    prev(HUDWidget, ClientInstance)   -- 先跑宿主原版，一行不损
+    zhBarsAttach(HUDWidget)           -- 再挂我们自己的 widget
+end
+```
+
+### 两种情况任选其一
+
+**A —— 没有别的 mod 动 `hud.lua`**（常见情况）：把"文件构成"里的三个文件按路径装好，收工。
+
+**B —— 别的 mod 占据了 `hud.lua`**：**不要**装本 mod 的 `hud.lua`。改为在*对方*那份
+`hud.lua` 的**最末尾**、`DisableGlobals()` 之前，加上同样的一行：
+
+```lua
+require("T6.Zombie.ZHBMount")
+```
+
+然后只装 `t6\zombie\` 下的那两个文件。两个 mod 都能正常工作，而且**对方日后更新也不会把我们的
+挂载覆盖掉**（入口始终由对方自己维护）。
+
+### 仍然可能撞车的点
+
+| 共享资源 | 本 mod 用的名字 | 风险 |
+|---|---|---|
+| `ui_mp/t6/hud.lua` | 官方文件 + 1 行 | 唯一的硬冲突——用上面的 B 方案绕开 |
+| 全局函数 | 只 wrap，不重定义 | 低 |
+| 全局命名空间 | `CoD.ZombieHealthBars`、`CoD.ZombieHealthBarsMount` | 独占，安全 |
+| `LUI.createMenu` 键 | `ZombieHealthBars` | 独占，安全 |
+| 事件名 | `zombie_bars` | 自定义，安全 |
+| 客户端 dvar | `zh_data_0..7`、`zh_dmg` | 独占前缀，安全 |
+| GSC 回调 | 不占用任何 `level.*` 单例 | 已与武器伤害类 mod 实测共存 |
+
+剩下唯一需要眼睛确认的是 **HUD 图层顺序**：我们的 widget 是 `addElement` 到 HUD 根，绘制次序
+跟随添加次序。若对方 mod 也在 HUD 根画大面积元素，可能互相遮挡——调换两边 `require` 的先后即可，
+不涉及功能损失。
 
 ---
 
@@ -204,6 +269,8 @@ LUI 读取后，每个命中占用数字池一个槽位，锚定到 GSC 在命�
 - **引擎的击杀回调不给命中坐标**（那里的 `shitloc` 是"命中部位名"，例如 `"helmet"`，不是坐标）。
   所以致命一击的数字会优先复用上一次非致命命中的位置；若是从满血一发带走，则退回身体命中位置、
   再退回僵尸位置，只能说是近似值。
+- 如果有**第三个** mod 也 wrap 了 `HUD_FirstSnapshot_Zombie`，包装顺序决定谁最后执行。我们只是
+  往 HUD 上加一个 widget，所以先后都能叠加，但多层 HUD mod 叠装时仍请留意。
 - 多人游戏中每个玩家的伤害数字发到各自 client dvar，彼此独立。但血条**可见性**虽按玩家分别计算，
   共享的仍是同一批僵尸集合，4 人以上未做压力测试。
 - 血条是**客户端注入（ui_mp）**；若 `ui_mp` 被清空或加载失败，血条会缺失。
