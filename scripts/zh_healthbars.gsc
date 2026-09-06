@@ -1,8 +1,6 @@
 // ============================================================================
 //  Zh_HealthBars  (T6 zombies)  --  fully standalone "injection" gametype.
 //  COD17-style zombie health bars + floating damage numbers, self-contained.
-//  Treat main.gsc as ABSENT: this file is its own gametype (init/main) and holds
-//  every bite of the health-bar logic, including the damage capture callback.
 //
 //  The LUI half lives in storage\t6\ui_mp\t6\hud.lua and
 //  storage\t6\ui_mp\t6\zombie\zombiehealthbars.lua (hot-reloaded separately).
@@ -10,6 +8,17 @@
 //  DATA FLOW -> LUI
 //    * zh_data_0..N   "entityNum:ratio100:alpha100:name;..."  (batched client dvars)
 //    * zh_dmg          "entityNum:amount:seq:distance;..."      (damage events)
+//
+//  NOTE ON DAMAGE CAPTURE (bugfix): we deliberately do NOT touch the engine's
+//  single-slot "level.callbackActorDamage" any more. That slot was being grabbed
+//  every 1s by BOTH this script AND main.gsc's own keep_damage_override(), so the
+//  two overwrote each other and whichever loop did NOT own the slot at hit-time
+//  silently dropped its events -> "some zombies fire no damage number". The
+//  single slot now belongs to main.gsc (weapon multipliers). Damage numbers are
+//  captured here via the ARRAY-based zombie_damage callback list instead, which
+//  supports many independent registrants (register_zombie_damage_callback), so it
+//  can never collide with anything else. The "amount" delivered on that path is
+//  the FINAL, post-multiplier damage -> the popup now matches the bar drain.
 // ============================================================================
 
 #include maps\mp\_utility;
@@ -88,28 +97,144 @@ main()
 
 init()
 {
-	println( "ZH_HEALTHBARS: init ran" );
 	level thread onPlayerConnect();
 	level thread onPlayerDisConnect();
 
 	// ---- zombie health bars (server side) ----
+	// Register the animname probe dvar so it exists (and tab-completes in the
+	// console) from map load. 0 = OFF, the normal playing state; `setdvar
+	// zh_animname 1` switches the raw-animname label probe on.
+	setdvar( "zh_animname", "0" );
+
 	// Track freshly-dead zombies so their bars drain away.
 	level.zh_dead = [];
 	register_zombie_death_event_callback( ::zh_mark_dead );
 
-	// Damage capture for floating numbers: hook the actor-damage callback (self =
-	// the damaged zombie, attacker = the shooting player). This stays self-contained
-	// here so the system does NOT depend on any other gametype script.
-    level thread keep_damage_override();
+	// Damage capture for floating numbers. Non-killing hits DO reach the ARRAY
+	// zombie_damage callback list (many registrants coexist -> never fights
+	// main.gsc's single-slot callbackActorDamage). self = the damaged zombie,
+	// player = attacker, amount = the FINAL post-multiplier damage dealt.
+	register_zombie_damage_callback( ::zh_actor_damage_hook );
+
+	// The KILLING blow is dropped by vanilla _zm_spawner::enemy_death_detection
+	// (its `if(!isalive(self)) return;` gate fires BEFORE zombie_damage), so the
+	// array hook never sees a one-shot kill -> those zombies fire NO number. We
+	// catch it on the engine's actor-KILLED path instead: _zm::actor_killed_override
+	// forwards to a PER-ENTITY self.actor_killed_override slot (_zm.gsc:4525-4526),
+	// where idamage is the real post-multiplier killing damage. zh_watch_all() tags
+	// every zombie AND dog (dogs skip zombie_spawn_init, so polling BOTH by
+	// targetname is required) with ::zh_killed_hook. This grabs NO level.* singleton
+	// -> never fights main.gsc's callbackActorDamage; and the killing blow never
+	// reaches the array hook, so the two popups are mutually exclusive per hit.
+	level thread zh_watch_all();
 }
 
-keep_damage_override()
+// Poll all zombies + dogs and attach ONE idempotent damage watcher per entity.
+// Polling (not the spawn-logic hook) is deliberate: dogs never run
+// zombie_spawn_init, so they would otherwise never get watched.
+// ---- BO1-style CRAWLER (theater map's gate-crawlers) --------------------------
+// The mod's actor-type name for it is not visible on disk (everything is inside
+// mod.ff) and EVERY AI entity shares classname "actor" (see the mod's own
+// zzz_zm_roundwatch.gsc:43), so guessing one name is unreliable. Instead we probe
+// a few plausible targetnames: whichever one hits gets stamped zh_isCrawler, and
+// if none hit nothing breaks - those actors simply keep the plain ZOMBIE label.
+zh_crawler_names()
 {
-	while(1)
+	names = [];
+	names[ names.size ] = "zombie_crawler";
+	names[ names.size ] = "sloth_crawler";
+	names[ names.size ] = "zombie_sloth_crawler";
+	names[ names.size ] = "zm_crawler";
+	names[ names.size ] = "crawler";
+	return names;
+}
+
+zh_crawlers()
+{
+	out = [];
+	names = zh_crawler_names();
+	for ( i = 0; i < names.size; i++ )
 	{
-		level.callbackActorDamage = ::_actor_damage_override_wrapper;
-		wait 1;
+		found = getentarray( names[i], "targetname" );
+		for ( j = 0; j < found.size; j++ )
+		{
+			if ( !isDefined( found[j] ) )
+				continue;
+			found[j].zh_isCrawler = 1;
+			out[ out.size ] = found[j];
+		}
 	}
+	return out;
+}
+
+zh_watch_all()
+{
+	level endon( "game_ended" );
+
+	for(;;)
+	{
+		targets = getentarray( "zombie", "targetname" );
+		dogs = getentarray( "zombie_dog", "targetname" );
+		foreach( dog in dogs )
+			targets[ targets.size ] = dog;
+		// crawlers too - zh_crawlers() also stamps the zh_isCrawler flag used for
+		// the label and the icon colour.
+		crawlers = zh_crawlers();
+		foreach( c in crawlers )
+			targets[ targets.size ] = c;
+
+		foreach( e in targets )
+		{
+			// _zm's vanilla actor_killed_override forwards to this PER-ENTITY slot
+			// (_zm.gsc:4525-4526) on the killing blow. We therefore NEVER grab the
+			// level.callbackactorkilled / callbackActorDamage singletons, so we
+			// cannot fight main.gsc. idamage there is the post-multiplier value.
+			if( isDefined( e ) && isAlive( e ) && !isDefined( e.zh_killedHooked ) )
+			{
+				e.zh_killedHooked = 1;
+				e.actor_killed_override = ::zh_killed_hook;
+				zh_attach_head_anchor( e );
+			}
+		}
+
+		wait 0.05;
+	}
+}
+
+// Fired by vanilla _zm::actor_killed_override through the PER-ENTITY forward at
+// _zm.gsc:4525-4526, with self = the dying zombie/dog. This is the one place the
+// engine hands us the KILLING blow's real damage (idamage) while both `attacker`
+// (a player) and `self.origin` are still valid. zh_actor_damage_hook NEVER sees
+// this blow (its source, enemy_death_detection, bails out at the !isalive gate),
+// so the array path and this killed path are mutually exclusive per hit -> no
+// duplicate popup, no gap. shitloc here is a hit LOCATION (see is_headshot), NOT
+// a coordinate, so zh_killed_hook resolves the point via a 3-tier fallback below.
+zh_killed_hook( einflictor, attacker, idamage, smeansofdeath, sweapon, vdir, shitloc, psoffsettime )
+{
+	if( !isDefined( attacker ) || !IsPlayer( attacker ) )
+		return;
+	if( attacker == self )
+		return;
+	if( !isDefined( idamage ) )
+		return;
+
+	// Where the killing-blow popup appears. NOTE: self.origin is the zombie's FEET,
+	// not its centre, so a bare origin fallback would spawn the number on the floor.
+	//  1) reuse the LAST NON-KILLING hit coordinate cached by zh_actor_damage_hook;
+	//  2) else the engine's own self.damagehit_origin (best effort: on a pure
+	//     one-shot this is usually still undefined, since zombie_damage never ran
+	//     for the killing blow, and the killed callback only carries shitloc/vdir,
+	//     never a world coordinate);
+	//  3) else lift ~45 units above the feet so it reads as the torso.
+	anchor = undefined;
+	if( isDefined( self.zh_lastHitOrigin ) )
+		anchor = self.zh_lastHitOrigin;
+	if( !isDefined( anchor ) && isDefined( self.damagehit_origin ) )
+		anchor = self.damagehit_origin;
+	if( !isDefined( anchor ) && isDefined( self.origin ) )
+		anchor = self.origin + ( 0, 0, 45 );
+
+	self zh_fire_number( attacker, idamage, anchor );
 }
 
 onPlayerConnect()
@@ -152,6 +277,66 @@ onPlayerSpawned()
 zh_mark_dead()
 {
 	level.zh_dead[ self getentitynumber() ] = gettime();
+
+	// Freeze the bar's bone anchor where it is (the drain should stay put rather
+	// than ride the death animation) and retire it AFTER the LUI faded the bar.
+	if ( isDefined( self.zh_headAnchor ) )
+		self.zh_headAnchor thread zh_retire_anchor();
+}
+
+// First bone tag on this AI that resolves to a real (non-zero) world point.
+// Zombies expose "tag_eye"/"j_head", hellhounds "J_EyeBall_LE"; a model missing
+// all of them yields undefined and we keep the old feet-origin behaviour.
+zh_head_tag( z )
+{
+	// NOTE: a GSC "( a, b, c )" literal is a VECTOR, so build a real array here.
+	cand = [];
+	cand[0] = "tag_eye";
+	cand[1] = "j_head";
+	cand[2] = "J_EyeBall_LE";
+	cand[3] = "tag_head";
+	for ( i = 0; i < cand.size; i++ )
+	{
+		o = z gettagorigin( cand[i] );
+		if ( isDefined( o ) && ( o[0] != 0 || o[1] != 0 || o[2] != 0 ) )
+			return cand[i];
+	}
+	return undefined;
+}
+
+// Spawn an INVISIBLE script_model, hard-attach it to the zombie's head/eye bone and
+// remember its entity number. linkto is resolved by the ENGINE every frame, so the
+// LUI just follows this anchor: the bar sits at the eyes with NO per-tick script and
+// NO extra dvar payload. (The damage-number anchors already prove a server
+// script_model's entity number is valid for setupEntityContainer.)
+zh_attach_head_anchor( z )
+{
+	if ( isDefined( z.zh_headAnchor ) )
+		return;
+
+	tag = zh_head_tag( z );
+	if ( !isDefined( tag ) )
+		return;
+
+	a = spawn( "script_model", z.origin );
+	a.zh_entNum = a getentitynumber();
+	// Zero world offset: the anchor sits exactly ON the eye/head bone. The bar's
+	// clearance is now applied in SCREEN space by the LUI (HEADZ * distance scale).
+	// Reason: a world-vertical +Z lift projects to (cos of pitch) on screen, so when
+	// the player looks down from high ground the lift collapses back onto the zombie
+	// and hides its head. A screen-space lift is immune to camera pitch.
+	a linkto( z, tag, ( 0, 0, 0 ), ( 0, 0, 0 ) );
+	z.zh_headAnchor = a;
+}
+
+// Detach so the bar stops following the corpse, then linger past the LUI fade and
+// delete: entity numbers must NOT be recycled while a bar can still reference them.
+zh_retire_anchor()
+{
+	self unlink();
+	wait 2;
+	if ( isDefined( self ) )
+		self delete();
 }
 
 // Delete a (short-lived) damage-number anchor after its number is long gone.
@@ -162,32 +347,35 @@ zh_delete_anchor()
 		self delete();
 }
 
-// Damage-number capture.  Runs as level.callbackActorDamage: self = the damaged
-// zombie, attacker = the player who dealt it, damage = actual damage dealt. We
-// pin the number to a STATIC anchor spawned AT the hit position so it does NOT
-// ride the zombie (spawn() at the position, not setorigin, which would not move).
-_actor_damage_override_wrapper( inflictor, attacker, damage, flags, meansofdeath, weapon, vpoint, vdir, shitloc, psoffsettime, boneindex )
+// Push ONE floating damage number through the shared channel: an entry in
+// player.zh_dmgList that zh_damage_hud() flushes to the `zh_dmg` client dvar.
+// self = the zombie (its origin is the fallback anchor point).
+zh_fire_number( player, amount, hit_origin )
 {
-	if( !isDefined( attacker ) || !IsPlayer( attacker ) || !isDefined( damage ) )
-		return damage;
+	if( !isDefined( player ) || !IsPlayer( player ) || !isDefined( amount ) )
+		return;
 
 	dmgDist = 0;
-	if( isDefined( attacker.origin ) && isDefined( self.origin ) )
-		dmgDist = int( Distance( attacker.origin, self.origin ) );
+	if( isDefined( player.origin ) && isDefined( self.origin ) )
+		dmgDist = int( Distance( player.origin, self.origin ) );
 
-	if( !isDefined( attacker.zh_dmgSeq ) )
-		attacker.zh_dmgSeq = 0;
-	attacker.zh_dmgSeq = attacker.zh_dmgSeq + 1;
+	if( !isDefined( player.zh_dmgSeq ) )
+		player.zh_dmgSeq = 0;
+	player.zh_dmgSeq = player.zh_dmgSeq + 1;
 
-	if( !isDefined( attacker.zh_dmgList ) )
+	if( !isDefined( player.zh_dmgList ) )
 	{
-		attacker.zh_dmgList = [];
-		attacker.zh_dmgTimes = [];
+		player.zh_dmgList = [];
+		player.zh_dmgTimes = [];
 	}
 
-	if( isDefined( self.origin ) )
+	spawnAt = self.origin;
+	if( isDefined( hit_origin ) )
+		spawnAt = hit_origin;
+
+	if( isDefined( spawnAt ) )
 	{
-		anchor = spawn( "script_model", self.origin );
+		anchor = spawn( "script_model", spawnAt );
 		anchor thread zh_delete_anchor();
 		dmgEnt = anchor getentitynumber();
 	}
@@ -196,10 +384,32 @@ _actor_damage_override_wrapper( inflictor, attacker, damage, flags, meansofdeath
 		dmgEnt = self getentitynumber();
 	}
 
-	attacker.zh_dmgList[ attacker.zh_dmgList.size ] = dmgEnt + ":" + int( damage + 0.5 ) + ":" + attacker.zh_dmgSeq + ":" + dmgDist;
-	attacker.zh_dmgTimes[ attacker.zh_dmgTimes.size ] = gettime();
+	player.zh_dmgList[ player.zh_dmgList.size ] = dmgEnt + ":" + int( amount + 0.5 ) + ":" + player.zh_dmgSeq + ":" + dmgDist;
+	player.zh_dmgTimes[ player.zh_dmgTimes.size ] = gettime();
+}
 
-	actor_damage_override_wrapper(inflictor, attacker, damage, flags, meansofdeath, weapon, vpoint, vdir, shitloc, psoffsettime, boneindex);
+// Array-callback entry for NON-killing hits. Killing hits are skipped by vanilla
+// enemy_death_detection (its !isalive gate) and are instead fired on the spot by
+// zh_killed_hook. Signature from
+// check_zombie_damage_callbacks: ( mod, hit_location, hit_origin, player, amount ),
+// self = the damaged zombie. Return false so we never suppress the damage path.
+zh_actor_damage_hook( mod, hit_location, hit_origin, player, amount )
+{
+	if( !isDefined( player ) || !IsPlayer( player ) || !isDefined( amount ) )
+		return false;
+
+	// Only numbers the player actually caused (never self/other AI).
+	if( player == self )
+		return false;
+
+	// Cache the real hit coordinate; a later killing blow (zh_killed_hook) reuses it.
+	if( isDefined( hit_origin ) )
+		self.zh_lastHitOrigin = hit_origin;
+
+	// Non-killing hits ONLY: a live zombie reaches here via the array callback,
+	// while the killing blow is fired by zh_killed_hook instead.
+	self zh_fire_number( player, amount, hit_origin );
+	return false;
 }
 
 // Push zombie health-bar data to this player's LUI via client dvar(s).
@@ -243,18 +453,40 @@ zombie_lui_push()
 			eyePos = self.origin + ( 0, 0, 60 );
 		zombies = GetAIArray( level.zombie_team );
 		dogs = getentarray( "zombie_dog", "targetname" );
-		for ( p = 0; p < ( zombies.size + dogs.size ); p++ )
+		crawlers = zh_crawlers();
+		// ONE flat pool: zombie_team + dogs + crawlers, de-duplicated, because a
+		// crawler may ALSO be registered in zombie_team - two entries for the same
+		// entity would push two bars onto one anchor.
+		pool = [];
+		for ( p = 0; p < zombies.size; p++ )
+			pool[ pool.size ] = zombies[p];
+		for ( p = 0; p < dogs.size; p++ )
 		{
-			if ( p < zombies.size )
-				z = zombies[p];
-			else
-				z = dogs[ p - zombies.size ];
+			dup = false;
+			for ( q = 0; q < pool.size; q++ )
+				if ( pool[q] == dogs[p] )
+					dup = true;
+			if ( !dup )
+				pool[ pool.size ] = dogs[p];
+		}
+		for ( p = 0; p < crawlers.size; p++ )
+		{
+			dup = false;
+			for ( q = 0; q < pool.size; q++ )
+				if ( pool[q] == crawlers[p] )
+					dup = true;
+			if ( !dup )
+				pool[ pool.size ] = crawlers[p];
+		}
+		for ( p = 0; p < pool.size; p++ )
+		{
+			z = pool[p];
 
 			if ( !isDefined( z ) )
 				continue;
-			// Hellhounds are NOT in level.zombie_team, so they're pulled separately
-			// above via the "zombie_dog" targetname. They still have health/origin,
-			// so the checks below handle them.
+			// Hellhounds are NOT in level.zombie_team, so they come in via the
+			// "zombie_dog" targetname; crawlers may live in either place. The de-dupe
+			// above guarantees exactly one payload entry per entity.
 
 			entNum = z getentitynumber();
 			dying = 0;
@@ -289,14 +521,14 @@ zombie_lui_push()
 			// so the ground and low cover don't wrongly block a visible zombie.
 			// bullettracepassed returns true when nothing solid is between the two
 			// points (0 = don't test characters, self = ignore the player).
-			if ( d <= 260 )
+			if ( d <= 300 )                                        // beyond this: hidden
 			{
 				if ( bullettracepassed( eyePos, ( z.origin + ( 0, 0, 40 ) ), 0, self ) )
 				{
-					if ( d <= 100 )
+					if ( d <= 150 )                                // within this: full 0.85
 						alpha = 0.85;
 					else
-						alpha = 0.85 * ( 260 - d ) / ( 260 - 100 );
+						alpha = 0.85 * ( 300 - d ) / ( 300 - 150 );   // linear fade 150 -> 300
 				}
 			}
 			// NOTE: we keep sending ALL alive zombies (even far ones, alpha = 0)
@@ -315,7 +547,9 @@ zombie_lui_push()
 				if ( dot > 0.99 && bullettracepassed( eyePos, ( z.origin + ( 0, 0, 40 ) ), 0, self ) )
 					aimed = 1;
 			}
-			if ( aimed && d <= 900 )
+			// NO distance cap: whatever the crosshair is on (and has line of sight to)
+			// reveals its bar, however far away it is.
+			if ( aimed )
 				alpha = 0.85;   // aimed zombie always shown (full-ish)
 
 			ratio = 1;
@@ -332,16 +566,60 @@ zombie_lui_push()
 			}
 			ratio = max( 0, min( ratio, 1 ) );
 
-			// Display name depends on the entity type (zombie vs hellhound). isdog
-			// is the same flag the mod's own scripts use to tell them apart.
+			// ONE dispatcher decides the label. animname is THE discriminator BO2 uses
+			// for every special zombie (each AI script assigns it): plain zombies
+			// "zombie" (_zm_spawner.gsc:179), dogs "zombie_dog" (_zm_ai_dogs.gsc:398),
+			// the theater crawler "quad_zombie" (zzz_zm_quaddescent.gsc:205), the
+			// Origins mech "mechz_zombie" (_zm_ai_mechz.gsc:527), etc. Their
+			// targetname/classname are all "zombie"/"actor", so this is the only
+			// reliable field. Adding a new kind = one else-if here + one colour row in
+			// the LUI's ICON_TINT table.
+			an = "";
+			if ( isDefined( z.animname ) )
+				an = z.animname;
 			zname = "ZOMBIE";
-			if ( isDefined( z.isdog ) && z.isdog )
+			if ( an == "zombie_dog" || ( isDefined( z.isdog ) && z.isdog ) )
 				zname = "HELLHOUND";
+			else if ( an == "quad_zombie" || ( isDefined( z.zh_isCrawler ) && z.zh_isCrawler ) )
+				zname = "CRAWLER";
+			else if ( an == "mechz_zombie" )
+				zname = "MECH";
+			else if ( an == "screecher_zombie" )
+				zname = "SHRIEKER";
+			else if ( an == "leaper_zombie" )
+				zname = "LEAPER";
+			else if ( an == "ghost_zombie" )
+				zname = "GHOST";
+			else if ( an == "brutus_zombie" || ( isDefined( z.is_brutus ) && z.is_brutus ) )
+				zname = "WARDEN";   // MoD jailer label; is_brutus is the stock flag (_zm_ai_brutus.gsc:282)
+			else if ( an == "astro_zombie" )
+				zname = "ASTRO";
+			else if ( an == "monkey_zombie" )
+				zname = "MONKEY";
+			else if ( an == "giant_robot_walker" )
+				zname = "ROBOT";
+			else if ( an == "napalm_zombie" )
+				zname = "FLAME";   // temple's fire zombie; name came from the live probe
+			// OPT-IN SELF-REPORTING PROBE (default OFF): with `setdvar zh_animname 1`
+			// any zombie whose animname is NOT mapped above prints its raw animname as
+			// the label, so an unknown monster kind reveals its own real name on screen;
+			// read it off the bar, add a row here + a colour row in ICON_TINT, then turn
+			// the probe back off. Because this is the LAST else-if, the getdvar only runs
+			// for already-unmapped entities - zero cost for the normal crowd, and 0 (or
+			// an unset dvar) keeps the plain ZOMBIE label.
+			else if ( an != "" && an != "zombie" && getdvar( "zh_animname" ) == "1" )
+				zname = an;
 
 			// entNum:ratio:alpha:name (no ':' or ';' in any field)
 			if ( cur != "" )
 				cur = cur + ";";
-			cur = cur + entNum + ":" + int( ratio * 100 + 0.5 ) + ":" + int( alpha * 100 + 0.5 ) + ":" + zname;
+			// Follow the bone anchor when we have one -> the bar sits at the eyes
+			// instead of "feet origin + fixed pixel offset". The payload keeps the
+			// same field count, so the LUI parser is unchanged.
+			barEnt = entNum;
+			if ( isDefined( z.zh_headAnchor ) && isDefined( z.zh_headAnchor.zh_entNum ) )
+				barEnt = z.zh_headAnchor.zh_entNum;
+			cur = cur + barEnt + ":" + int( ratio * 100 + 0.5 ) + ":" + int( alpha * 100 + 0.5 ) + ":" + zname + ":" + int( d );
 			curCount = curCount + 1;
 			if ( curCount >= zh_batch )
 			{
